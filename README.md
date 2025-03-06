@@ -14,7 +14,7 @@ Currently working with Axpert King Inverter (Rack), basically because it is what
 - Read only values: power, voltage, etc...
 - Most configuration settings. Some settings, such as output type (i.e. three-phase output) are provided read-only in HASS for safety, as these should be really set at physical installation time. These can still be changed manually via command line.
 - Command line access to the inverter commands, even if the service is running in the background.
-- **Configuration mode**: By default, settings cannot be changed unless configuration PIN is provided in HASS. A random PIN is created on first run and stored in `inverter.conf` the first time the service is run. Leave it blank (not commented) to disable PIN. Please see [bugs](https://github.com/puzzle-star/axpert-inverter-hass/new/master?filename=README.md#bugs) below about PIN being recorded and readeble in Home Assistant.
+- **Configuration mode**: By default, settings cannot be changed unless configuration PIN is provided in HASS. A random PIN is created on first run and stored in `inverter.conf` the first time the service is run. Leave it blank (not commented) to disable PIN. Please see [bugs](https://github.com/puzzle-star/axpert-inverter-hass/new/master?filename=README.md#bugs) below about PIN being recorded and readable in Home Assistant.
 
 ## Installation
 
