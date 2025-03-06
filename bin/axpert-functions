@@ -1,0 +1,180 @@
+#!/bin/bash
+
+function axpert-query-install {
+	set -x
+
+	[ -d "${BASEDIR}" ] || return 1
+
+	[ -r "${BASEDIR}/etc/inverter.conf" ] || cp -av "${BASEDIR}/etc/inverter.conf.sample" "${BASEDIR}/etc/inverter.conf"
+
+	gcc -o "${BASEDIR}/bin/axpert-connect" "${BASEDIR}/src/axpert-connect.c"
+
+	[ -d "/usr/local/lib/systemd/system" ] || mkdir -p /usr/local/lib/systemd/system
+
+	cp -av "${BASEDIR}"/lib/systemd/*.service /usr/local/lib/systemd/system
+	cp -av "${BASEDIR}"/lib/udev/axpert-inverter-usbhid.rules /etc/udev/rules.d/99-axpert-inverter-usbhid.rules
+
+	systemctl daemon-reload
+	systemctl reload udev
+
+	systemctl enable axpert-inverter-usbhid@inverter
+	systemctl start axpert-inverter-usbhid@inverter
+
+	systemctl enable axpert-inverter-hass-monitor@inverter
+	systemctl start axpert-inverter-hass-monitor@inverter
+
+	set +x
+}
+
+function config {
+	local __FILE="$1"
+	local __CONFIG="$2"
+	local __TAB=$'\t'
+	local __VAR
+	local __LINE
+
+	[ -r "${__FILE}" ] || return 1
+
+	declare -gA "${__CONFIG}"
+	declare -n "__VAR=${__CONFIG}"
+
+	while read __LINE
+	do
+		__LINE="${__LINE%%#*}"
+		[ -n "${__LINE//[!=]}" ] || continue
+
+		local __NAME="${__LINE%%=*}"
+		__NAME="${__NAME%${__NAME##*[! ${__TAB}]}}"
+		__NAME="${__NAME#${__NAME%%[! ${__TAB}]*}}"
+
+		local __VALUE="${__LINE#*=}"
+		__VALUE="${__VALUE%${__VALUE##*[! ${__TAB}]}}"
+		__VALUE="${__VALUE#${__VALUE%%[! ${__TAB}]*}}"
+
+		local __QUOTE="${__VALUE:0:1}"
+		[ "'" = "${__QUOTE}" -o "\"" = "${__QUOTE}" ] && [ "${__QUOTE}" = "${__VALUE: -1:1}" ] && __VALUE="${__VALUE:1:-1}"
+
+		__VAR[${__NAME}]="${__VALUE}"
+	done <"${__FILE}"
+
+	return 0
+}
+
+function error {
+	echo "$0: $@" >&2
+}
+
+function devopen {
+	declare -g "$2"=
+	declare -n "__FD__"="$2"
+
+	[ ! -c "$1" ] && error "not a character device ($1)" && return 1
+
+	exec {__FD__}<>"$1"
+
+	flock -x -w "${TIMEOUT:-5}" "${__FD__}" 
+}
+
+function devclose {
+	declare -g "$1"=
+	declare -n "__FD__"="$1"
+
+	flock -u "${__FD__}"
+	exec {__FD__}>&-
+}
+
+function devflush {
+	local FLUSHED=0
+	
+	while read -r -N 1 -t 0
+	do
+		read -r -N 1 || break
+		FLUSHED=$[ ${FLUSHED} + 1 ]
+		sleep 0.1
+	done
+	
+	[ ${FLUSHED} -gt 0 ] && echo "Flushed ${FLUSHED} characters from input" >&2
+
+	return 0
+}
+
+function axpert-query {
+	local DEV
+	local FD
+	local INPUT
+
+	DEV="$1"
+	shift 1
+
+	[ -n "$*" ] || return 0
+
+	devopen "${DEV}" "FD"
+	[ -n "${FD}" ] || return 1
+
+	devflush <&${FD}
+
+	echo "$*" >&${FD}
+	read -r INPUT <&${FD}
+
+	devclose "FD"
+
+	echo "${INPUT}"
+}
+
+
+# -----------------------------------------------------------------------------------------------------------
+# Config mode functions
+# -----------------------------------------------------------------------------------------------------------
+
+AXPERT_CONFIG_MODE_ENABLED="0"
+AXPERT_CONFIG_MODE_TIMEOUT=
+
+function axpert-check-config-mode {
+	[ -z "${AXPERT_CONFIG_MODE_ENABLED}" -a -z "${CONFIG[CONFIG_MODE_PIN]}" ] && {
+		echo "Enabling Config Mode (no PIN)" >&2
+		AXPERT_CONFIG_MODE_ENABLED="1"
+	}
+
+	[ -n "${AXPERT_CONFIG_MODE_TIMEOUT}" ] && [ "${AXPERT_CONFIG_MODE_TIMEOUT}" -lt "${EPOCHSECONDS}" ] && {
+		echo "Config Mode Timed-out" >&2
+		AXPERT_CONFIG_MODE_TIMEOUT=
+		AXPERT_CONFIG_MODE_ENABLED="0"
+	}
+
+	if [ "1" = "${AXPERT_CONFIG_MODE_ENABLED}" ]
+	then
+		return 0
+	else
+		return 1
+	fi
+}
+
+function axpert-get-config-mode {
+	if [ "1" = "${AXPERT_CONFIG_MODE_ENABLED}" ]
+	then
+		echo "enabled"
+	else
+		echo "disabled"
+	fi
+}
+
+function axpert-set-config-mode {
+	if [ "enabled" = "$1" ]
+	then
+		[ -z "$2" -a -n "${CONFIG[CONFIG_MODE_PIN]}" ] && {
+			echo "Cannot Enable Config Mode (use PIN)" >&2
+			return 1
+		}
+
+		echo "Config Mode Enabled" >&2
+
+		local CONFIG_MODE_TIMEOUT="${CONFIG[CONFIG_MODE_TIMEOUT]-300}"
+		[ "${CONFIG_MODE_TIMEOUT:-0}" -gt 0 ] && AXPERT_CONFIG_MODE_TIMEOUT="$[ ${EPOCHSECONDS} + 10#${CONFIG_MODE_TIMEOUT} ]"
+		AXPERT_CONFIG_MODE_ENABLED="1"
+	else
+		echo "Config Mode Disabled" >&2
+		AXPERT_CONFIG_MODE_TIMEOUT=
+		AXPERT_CONFIG_MODE_ENABLED="0"
+	fi
+}
+

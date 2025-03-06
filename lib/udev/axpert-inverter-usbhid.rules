@@ -1,0 +1,1 @@
+ACTION=="add", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0665", ATTRS{idProduct}=="5161", ATTRS{product}=="HID in FS Mode", MODE="0660", GROUP="tty", SYMLINK+="axpert-inverter-usbhid"

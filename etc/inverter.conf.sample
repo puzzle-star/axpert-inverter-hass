@@ -1,0 +1,8 @@
+MQTT_USER=""			# Put your MQTT user here.
+MQTT_PASSWORD=""		# Put your MQTT password here.
+
+# CONFIG_MODE_PIN=""		# Leave blank to disable config mode PIN. First run will create a PIN if left commented.
+# CONFIG_MODE_TIMEOUT=300	# Leave blank or 0 to disable timeout.
+
+# INVERTER_NAME="Inverter"	# Name for the device created in HASS.
+# INVERTER_MODEL=""		# Used to determine the "defs file" (commmand protocol) to load. First run will be try to discover automatically.

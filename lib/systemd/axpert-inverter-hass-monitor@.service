@@ -1,0 +1,21 @@
+[Unit]
+Description=Axpert Inverter HASS Monitor (%i)
+
+[Service]
+Type=simple
+# User=root
+# Group=root
+# Restart=on-failure
+Restart=always
+RestartSec=10
+SyslogIdentifier=axpert-inverter-hass-monitor@%i
+StandardInput=null
+StandardOutput=journal
+StandardError=journal
+WorkingDirectory=/tmp
+ExecStart=/opt/inverter/bin/axpert-query --inverter=%i --mqtt --hass --monitor
+
+[Install]
+WantedBy=multi-user.target
+DefaultInstance=inverter
+

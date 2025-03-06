@@ -1,0 +1,82 @@
+#!/usr/bin/python3 -u
+
+# apt-get install python3-paho-mqtt || pip3 install paho-mqtt
+
+import sys
+import os
+import signal
+import re
+import paho.mqtt.client as mqtt
+from select import select
+
+def signal_handler(signal, frame):
+        os.write(break_pipe[1], b'.')
+
+def on_connect(client, userdata, flags, rc):
+    global connected
+
+    if rc != 0:
+        print("Error connecting to MQTT", file=sys.stderr)
+        connected = False
+        os.write(break_pipe[1], b'.')
+        return
+
+    connected = True
+
+    for subscribe in subscriptions:
+        # print("Subscribing to "+subscribe)
+        client.subscribe(subscribe)
+
+def on_message(client, userdata, msg):
+    print(msg.topic+"#"+msg.payload.decode())
+
+
+def main(username, password, subscribe):
+    global subscriptions
+    global connected
+    global break_pipe
+
+    signal.signal(signal.SIGINT, signal_handler)
+
+    subscriptions = subscribe
+    connected = False
+    break_pipe = os.pipe()
+
+    client = mqtt.Client(client_id="", clean_session=True, transport="tcp")
+
+    client.username_pw_set(username, password)
+    client.on_connect = on_connect
+    client.on_message = on_message
+
+    client.connect(host="localhost", port=1883, keepalive=60)
+
+    client.loop_start()
+
+    rc = 0
+
+    while True:
+        readables, writeables, exceptions = select([sys.stdin, break_pipe[0]], [], [])
+
+        if break_pipe[0] in readables:
+            rc = 1
+            break
+
+        if sys.stdin in readables:
+            line = sys.stdin.readline()
+            if not line:
+                rc = 0
+                break
+
+            m = re.fullmatch('([^#+]+)([#+])(.*)', line.strip())
+            if m:
+                client.publish(m.group(1), payload=m.group(3), qos=2, retain=m.group(2) == '+').wait_for_publish()
+
+    client.loop_stop()
+
+    return rc
+
+
+if __name__ == "__main__":
+    rc = main(username=os.environ.get('MQTT_USER'), password=os.environ.get('MQTT_PASSWORD'), subscribe=sys.argv[1:])
+    exit(rc)
+

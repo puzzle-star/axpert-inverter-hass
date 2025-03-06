@@ -1,0 +1,21 @@
+[Unit]
+Description=Axpert Inverter USB HID Serial Protocol Connector (%i)
+
+[Service]
+Type=simple
+# User=root
+# Group=root
+# Restart=on-failure
+Restart=always
+RestartSec=10
+SyslogIdentifier=axpert-inverter-usbhid@%i
+StandardInput=null
+StandardOutput=journal
+StandardError=journal
+WorkingDirectory=/tmp
+ExecStart=/opt/inverter/bin/axpert-connect --hid --pty=/dev/axpert-%i /dev/axpert-%i-usbhid 
+
+[Install]
+WantedBy=multi-user.target
+DefaultInstance=inverter
+

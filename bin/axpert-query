@@ -1,0 +1,909 @@
+#!/bin/bash
+
+BASEDIR="$(realpath "$(dirname $0)/..")"
+
+. "${BASEDIR}/bin/axpert-functions"
+
+function axpert-parse-response {
+	local NOUNITS=
+	[ ":$1" = ":-u" ] && {
+		NOUNITS=1
+		shift 1
+	}
+
+	local COMMAND="${1%%[!A-Z0-9!]*}"
+	shift 1
+
+	[ -z "${COMMAND}" ] && return 1
+	local COMMAND_VAR="${COMMAND//!/_}"
+	local COMMAND_DEFS_NAME="AXPERT_COMMAND_${COMMAND_VAR}"
+
+	local RESPONSE=("$@")
+	local COMMAND_DEFS COMMAND_RESPONSE_COUNT COMMAND_RESPONSES
+
+	declare -n COMMAND_DEFS="${COMMAND_DEFS_NAME%__}"
+	declare -n COMMAND_RESPONSE_COUNT="AXPERT_COMMAND_${COMMAND_VAR}_RESPONSE_COUNT"
+
+	[ -z "${RESPONSE[*]}" -o "NACK" = "${RESPONSE[0]}" ] && error "bad response for ${COMMAND} command (${RESPONSE[@]}) " && return 1
+
+	[ -n "${COMMAND_RESPONSE_COUNT}"  ] && [ "${#RESPONSE[@]}" -ne "${COMMAND_RESPONSE_COUNT}" ] && error "bad response count for ${COMMAND} command (${RESPONSE[@]}) " && return 1
+
+	if [ -z "${!COMMAND_DEFS[*]}" ]
+	then
+		COMMAND_RESPONSES=( "${COMMAND,,}" )
+	else
+		COMMAND_RESPONSES=( "${!COMMAND_DEFS[@]}" )
+	fi
+
+	local NAME VAR
+
+	for NAME in "${COMMAND_RESPONSES[@]}"
+	do
+		declare -n VAR="AXPERT_COMMAND_${COMMAND_VAR}_${NAME^^}"
+
+		local INDEXES INDEX IDX
+		local VALUE VAL EVAL
+		local UNITS=
+
+		INDEXES=(${VAR[INDEX]})
+
+		if [ -z "${VAR[*]}" ]
+		then
+			VALUE="${RESPONSE[*]}"
+		elif [ -n "${INDEXES[0]}" -a -z "${INDEXES[0]/*[a-zA-Z]*/}" ]
+		then
+			local FUNCTION="${INDEXES[0]}"
+			local FPARM=( "${INDEXES[@]:1}" )
+
+			declare -a FARGS
+			local PARM
+			for PARM in "${FPARM[@]}"
+			do
+				[ -z "${PARM##\{*}" -a -z "${PARM%%*\}}" -a -n "${PARM//\{*[!a-z0-9_]*\}}" ] && {
+					PARM="${PARM:1:-1}"
+					declare -n VPARM="AXPERT_COMMAND_${COMMAND_VAR}_${PARM^^}"
+					PARM="${RESPONSE[$[ ${VPARM[INDEX]} - 1 ]]}"
+				}
+
+				FARGS+=("${PARM}")
+			done
+
+			VALUE=$("${FUNCTION}" "${FARGS[@]}")
+		else
+			[ -z "${INDEXES}" ] && INDEXES=( "1" )
+
+			VALUE=
+			for INDEX in "${INDEXES[@]}"
+			do
+				IDX="${INDEX%.*}"
+				VAL="${RESPONSE[$[ ${IDX} - 1 ]]}"
+				VAL="${VAL#${VAR[STRIP]}}"
+
+				[ -z "${INDEX//*.*}" ] && VAL="${VAL:$[ ${INDEX#*.} - 1]:1}"
+
+				VALUE="${VALUE}${VAL}"
+			done
+		fi
+
+		[ -n "${VAR[POSTPROCESS]}" ] && {
+			local POSTPROCESS="${VAR[POSTPROCESS]}"
+			[ -n "${POSTPROCESS//*\{\}*}" ] && POSTPROCESS+=" {}"
+
+			VALUE="$(${POSTPROCESS[*]// \{\}/ ${VALUE}})"
+		}
+
+		EVAL="${VALUE//[!a-zA-Z0-9_]/_}"
+		EVAL="${EVAL^^}"
+	
+		[ -n "${VAR[VALUE_${EVAL}]+set}" ] && VALUE="${VAR[VALUE_${EVAL}]}"
+
+		[ -n "${VAR[UNITS]+set}" -a -n "${VALUE}" ] && {
+			VALUE="${VALUE#${VALUE%%[!0]*}}"
+			[ -z "${VALUE//*.*}" ] && VALUE="${VALUE%${VALUE##*[!0]}}"
+			[ -z "${VALUE}" -o "${VALUE:0:1}" = '.' ] && VALUE="0${VALUE}"
+			[ "${VALUE: -1:1}" = '.' ] && VALUE="${VALUE}0"
+		}
+	
+		[ -z "${NOUNITS}" ] && UNITS="${VAR[UNITS]}"
+
+		echo "${NAME}=${VALUE}${UNITS}" 2>/dev/null
+	done
+
+	return 0
+}
+
+function axpert-command {
+	local COMMANDS=( "$@" )
+	local OUTPUT=()
+	local PARGS=()
+	
+	[ -n "${HASS}" ] && PARGS+=( "-u" )
+	
+	local COMMAND_VALUES
+	local VALUE_COMMANDS
+	declare -A COMMAND_VALUES=()
+	declare -A VALUE_COMMANDS=()
+
+	local COMMAND 
+
+	for COMMAND in "${COMMANDS[@]}"
+	do
+		[ -n "${COMMAND_VALUES[${COMMAND}]+set}" ] && continue
+
+		if [ -z "${COMMAND##!*}" ]
+		then
+			local COMMAND_VAR="${COMMAND//!/_}"
+			local RESPONSE="!"
+		elif [ -n "${COMMAND//*[!A-Za-z0-9_]*}" ]
+		then
+			local COMMAND_VAR="${COMMAND}"
+			local RESPONSE=( $(axpert-query "${DEV}" "${COMMAND}") )
+			[ -z "${RESPONSE[*]}" ] && return 3
+		else
+			echo "Skipping bad command: ${COMMAND}" >&2
+			continue
+		fi
+	
+		if [ -n "${RAW}" ]
+		then
+			OUTPUT+=( "${RESPONSE[*]}" )
+			VALUE_COMMANDS[${COMMAND_VAR,,}]="${COMMAND}"
+			COMMAND_VALUES[${COMMAND}]+="${COMMAND_VAR,,}"
+		else
+			local PARSED=()
+			local NAMES=()
+			local PARSED_NAME
+	
+			while read -r LINE
+			do
+				PARSED+=( "${LINE}" )
+				PARSED_NAME="${LINE%%=*}"
+				NAMES+=( "${PARSED_NAME}" )
+				VALUE_COMMANDS[${PARSED_NAME}]="${COMMAND}"
+			done < <(axpert-parse-response "${PARGS[@]}" "${COMMAND}" "${RESPONSE[@]}")
+	
+			COMMAND_VALUES[${COMMAND}]="${NAMES[@]}"
+	
+			[ -z "${HASS}" -a -z "${PARSED[*]}" ] && return 3
+	
+			OUTPUT+=( "${PARSED[@]}" )
+		fi
+	done
+	
+	if [ -n "${RAW}" ]
+	then
+		echo "${OUTPUT[@]}" 2>/dev/null
+	else
+		local SEPARATOR=
+		local PREVIOUS_COMMAND=
+	
+		# OUTPUT+=("last_updated=$(date --iso-8601=seconds)")
+	
+		[ -n "${JSON}" -a -z "${HASS}" ] && echo -n "{" 2>/dev/null
+
+		local LINE
+	
+		for LINE in "${OUTPUT[@]}"
+		do
+			if [ -z "${JSON}" ]
+			then
+				echo "${LINE}" 2>/dev/null
+			else
+				local NAME="${LINE%%=*}"
+				local VALUE="${LINE#*=}"
+	
+				local COMMAND="${VALUE_COMMANDS[${NAME}]}"
+				local COMMAND_VAR="${COMMAND//!/_}"
+	
+				if [ -n "${HASS}" -a ":${COMMAND}" != ":${PREVIOUS_COMMAND}" ]
+				then
+					PREVIOUS_COMMAND="${COMMAND}"
+	
+					[ -n "${SEPARATOR}" ] && {
+						echo "}" 2>/dev/null
+						SEPARATOR=
+					}
+	
+					echo -n "${INVERTER}/state/${COMMAND,,} {" 2>/dev/null
+				fi
+	
+				declare -n VAR="AXPERT_COMMAND_${COMMAND_VAR}_${NAME^^}"
+
+				[ -z "${VALUE}" -a -n "${VAR[DEFAULT]:+set}" ] && VALUE="${VAR[DEFAULT]}"
+
+				if [ -z "${VALUE}" ]
+				then
+					if [ -z "${VAR[DEFAULT]+set}" ]
+					then
+						VALUE="null"
+					else
+						VALUE="\"\""
+					fi
+				# elif [ "true" = "${VALUE,,}" -o "false" = "${VALUE,,}" ]
+				# then
+				# 	VALUE="${VALUE,,}"
+				elif [ -z "${HASS}" -o -z "${VAR[UNITS]+set}" ]
+				then
+					VALUE="\"${VALUE}\""
+				elif [ -z "${VALUE//[0-9-]}" -a -n "${VALUE//*[0-9-]-*}" -a -n "${VALUE##0[0-9]*}" -a -n "${VALUE##-0*}" ]
+				then
+					[ ${VALUE} -ge 0 -o ${VALUE} -le 0 ] 2>/dev/null || VALUE="\"${VALUE}\""
+				elif [ -z "${VALUE//[0-9.-]}" -a -z "${VALUE//*[0-9].[0-9]*}" -a -n "${VALUE//*[0-9.-]-*}" -a -n "${VALUE//*.*.*}" -a -n "${VALUE##0[0-9]*}" -a -n "${VALUE##-0[0-9]*}" ]
+				then
+					VALUE="${VALUE%${VALUE##*[!0]}}"
+					[ "${VALUE: -1:1}" = "." ] && VALUE="${VALUE}0"
+				else
+					VALUE="\"${VALUE}\""
+				fi
+	
+				echo -n "${SEPARATOR}\"${NAME}\":${VALUE}" 2>/dev/null
+	
+				SEPARATOR=","
+			fi
+		done
+	
+		[ -n "${JSON}" ] && echo "}" 2>/dev/null
+	fi
+
+	return 0
+}
+
+function signal-terminate {
+	declare -g TERMINATE_SIGNAL="$1"
+	echo "Terminated by signal ($1)" >&2
+
+	[ -n "${MONITOR_INPUT}" ] && echo >&${MONITOR_INPUT}
+
+	return 0
+}
+
+function axpert-monitor {
+	exec 0<&${MONITOR_OUTPUT}
+
+	local MONITOR="$1"
+	local HASS="$2"
+	local DEV="$3"
+
+	[ -n "${HASS}" ] && {
+		local INVERTER_NAME="$4"
+		hass-register "${DEV}" "${HASS}" "${INVERTER}" "${INVERTER_NAME}" || return 1
+	}
+
+	axpert-command ${AXPERT_STATUS_COMMANDS[*]} || return 2
+	local LAST="${EPOCHSECONDS}"
+
+	while :
+	do
+		local MONITOR_COMMAND
+		local WAIT="$[ ${LAST} + ${MONITOR} - ${EPOCHSECONDS} ]"
+
+		[ ${WAIT} -le 0 ] && {
+			LAST="${EPOCHSECONDS}"
+			WAIT="1"
+		}
+
+		# echo "Monitor waiting for ${WAIT} seconds (${EPOCHSECONDS})" >&2
+
+		read -u "${MONITOR_OUTPUT}" -r -t "${WAIT}" MONITOR_COMMAND 2>/dev/null
+		RC=$?
+
+		[ -n "${TERMINATE_SIGNAL}" ] && break
+	       	[ $RC -ne 0 -a $RC -le 128 ] && break
+
+		if [ $RC -gt 128 ]
+		then
+			# echo "Monitor status (${EPOCHSECONDS}): ${AXPERT_STATUS_COMMANDS['monitor']}" >&2
+			axpert-check-config-mode
+			axpert-command ${AXPERT_STATUS_COMMANDS['monitor']} || return 2
+			LAST="$[ ${LAST} + ${MONITOR} ]"
+		elif [ -n "${MONITOR_COMMAND##=*}" -a -z "${MONITOR_COMMAND//*[#+=]*}" ]
+		then
+			# echo "Monitor command (${EPOCHSECONDS}): ${MONITOR_COMMAND}" >&2
+			# echo "<<< ${MONITOR_COMMAND}" >&2
+
+			local NAME="${MONITOR_COMMAND%%[#+=]*}"
+			local VALUE="${MONITOR_COMMAND#*[#+=]}"
+
+			# echo "<<< ${NAME}: ${VALUE}" >&2
+
+			[ -z "${NAME//*[!a-zA-Z0-9_]*}" ] && continue
+			[ -n "${AXPERT_SETTINGS[${NAME}]:+set}" ] || continue
+
+			local STATUS_COMMAND="${AXPERT_SETTINGS["${NAME}"]}"
+
+			declare -n SETTING_VAR="AXPERT_SETTING_${NAME^^}"
+			declare -n STATUS_VAR="AXPERT_COMMAND_${STATUS_COMMAND//!/_}_${NAME^^}"
+
+			local OPTIONS=(${STATUS_VAR[VALUES]})
+			local OVALUE="${VALUE}"
+
+			[ -n "${OPTIONS[*]}" ] && {
+				VALUE=
+
+				local OPTION
+
+				for OPTION in "${OPTIONS[@]}"
+				do
+					[ ":${OVALUE}" = ":${OPTION}" -o ":${OVALUE}" = ":${STATUS_VAR[VALUE_${OPTION^^}]}" ] && {
+						VALUE="${OPTION}"
+						break
+					}
+				done
+
+				[ -n "${VALUE}" ] || continue
+			}
+
+			[ -n "${SETTING_VAR[VALUE_${VALUE^^}]}" ] && VALUE="${SETTING_VAR[VALUE_${VALUE^^}]}"
+
+			local SETTING_COMMAND="${SETTING_VAR[COMMAND]}"
+			local COMMAND_RESPONSE
+
+			if [ -z "${SETTING_COMMAND##!*}" ]
+			then
+				SETTING_COMMAND="${SETTING_COMMAND:1}"
+				"${SETTING_COMMAND}" "${VALUE}" >/dev/null
+			elif axpert-check-config-mode
+			then
+				[ -n "${SETTING_COMMAND//*\{\}*}" ] && SETTING_COMMAND+="{}"
+		       		SETTING_COMMAND="${SETTING_COMMAND/\{\}/${VALUE}}"
+				COMMAND_RESPONSE="$(axpert-query "${DEV}" "${SETTING_COMMAND}")"
+
+				echo "Setting '${NAME}' to '${OVALUE}' (${SETTING_COMMAND}: ${COMMAND_RESPONSE})" >&2
+			else
+				echo "Unable to change '${NAME}' to '${OVALUE}'. Config mode is locked." >&2
+			fi
+
+			axpert-command "${STATUS_COMMAND}" || return 2
+		fi
+	done
+}
+
+function hass-origin {
+	local NAME="Axpert Inverter Custom Integration"
+	local URL="https://kubxray.net"
+
+	cat <<-EOF | tr -d '\n'
+		"origin":{
+			"name":"${NAME}",
+			"url":"${URL}"
+		}
+	EOF
+}
+
+function hass-add-json {
+	local JSON="$1"
+	local BEFORE="$2"
+	local ADD="$3"
+
+	echo "${JSON/\"${BEFORE}\":/${ADD},\"${BEFORE}\":}" 
+}
+
+function hass-register-entity {
+	local HASS="$1"
+	local COMPONENT="${2%.*}"
+	local INVERTER="$3"
+	local SERIAL="$4"
+	local ENTITY="$5"
+	local NAME="$6"
+	local UNITS="$7"
+	local STATE_CLASS="${8}"
+	local STATE_TOPIC="${9}"
+
+	local DEVICE_ID="inverter-${SERIAL//[!a-zA-Z0-9_-]/_}"
+	local FORCE_UPDATE="false"
+	local DEVICE_CLASS=
+
+	[ -z "${2//*.*}" ] && DEVICE_CLASS="${2#*.}"
+	[ -n "${STATE_CLASS}" ] && FORCE_UPDATE="true"
+
+	cat <<-EOF | tr -d '\n'
+		${HASS}/${COMPONENT}/${ENTITY}/${DEVICE_ID}/config {
+			"device":{
+				"identifiers":["${DEVICE_ID}"]
+			},
+			"name":"${NAME}",
+			"platform":"${COMPONENT}",
+			"unique_id":"${DEVICE_ID//-/_}_${ENTITY}",
+			"object_id":"${INVERTER//-/_}_${ENTITY}",
+			"device_class":${DEVICE_CLASS:+\"}${DEVICE_CLASS:-null}${DEVICE_CLASS:+\"},
+			"state_class":${STATE_CLASS:+\"}${STATE_CLASS:-null}${STATE_CLASS:+\"},
+			"force_update":${FORCE_UPDATE},
+			"unit_of_measurement":${UNITS:+\"}${UNITS:-null}${UNITS:+\"},
+			"value_template":"{{ value_json.${ENTITY} }}",
+			"state_topic":"${MQTT_TOPIC}${MQTT_TOPIC:+/}${INVERTER}/state/${STATE_TOPIC}"
+		}
+	EOF
+	echo
+}
+
+function hass-register {
+	local DEV="$1"
+	local HASS="$2"
+	local INVERTER="$3"
+	local INVERTER_NAME="$4"
+
+	local SERIAL="$(axpert-query "${DEV}" "QSID")"
+	local MODEL="$(axpert-query "${DEV}" "QMN")"
+	local MODEL_ID="$(axpert-query "${DEV}" "QGMN")"
+	local FW_VERSION="$(axpert-query "${DEV}" "QVFW")"
+	local FW_VERSION_2="$(axpert-query "${DEV}" "QVFW2")"
+	local FW_VERSION_3="$(axpert-query "${DEV}" "QVFW3")"
+	local PROTOCOL="$(axpert-query "${DEV}" "QPI")"
+
+	[ -z "${SERIAL}" -o -z "${FW_VERSION}" ] && return 2
+
+	FW_VERSION="${FW_VERSION#*:}"
+	FW_VERSION_2="${FW_VERSION_2#*:}"
+	FW_VERSION_3="${FW_VERSION_3#*:}"
+
+	[ -n "${FW_VERSION_2//[0.]}" ] && FW_VERSION="${FW_VERSION}, ${FW_VERSION_2}"
+	[ -n "${FW_VERSION_3//[0.]}" ] && FW_VERSION="${FW_VERSION}, ${FW_VERSION_3}"
+
+	local PROCESSED_COMMANDS
+	declare -A PROCESSED_COMMANDS=()
+
+	for COMMAND in ${AXPERT_STATUS_COMMANDS[serial]} ${AXPERT_STATUS_COMMANDS[*]}
+	do
+		[ -n "${PROCESSED_COMMANDS[${COMMAND}]+set}" ] && continue
+		[ -n "${COMMAND//*[!A-Z0-9_!]*}" ] || continue
+
+		local COMMAND_VAR="${COMMAND//!/_}"
+		local COMMAND_DEF_NAME="AXPERT_COMMAND_${COMMAND_VAR}"
+
+		declare -n COMMAND_DEFS="${COMMAND_DEF_NAME%__}"
+
+		local NAME VAR
+
+		for NAME in "${!COMMAND_DEFS[@]}"
+		do
+			declare -n VAR="AXPERT_COMMAND_${COMMAND_VAR}_${NAME^^}"
+
+			[ -z "${VAR[*]}" ] && {
+				echo "Invalid definition for command '${COMMAND}/${NAME}'" >&2
+				continue
+			}
+
+			local TYPE="${VAR[TYPE]#!}"
+			local UNITS="${VAR[UNITS]}"
+			local PLATFORM="${TYPE%.*}"
+			local FRIENDLY_NAME="${COMMAND_DEFS[${NAME}]}"
+			local DEVICE_CLASS=
+			local STATE_CLASS=
+
+			[ -z "${TYPE##measurement*}" ] && {
+				TYPE="${TYPE/measurement/sensor}"
+				STATE_CLASS="measurement"
+			}
+
+			[ -z "${TYPE##total*}" ] && {
+				TYPE="${TYPE/total/sensor}"
+				STATE_CLASS="total"
+			}
+
+			[ -z "${TYPE//*.*}" ] && DEVICE_CLASS="${TYPE#*.}"
+
+			local JSON="$(hass-register-entity "${MQTT_TOPIC}${MQTT_TOPIC:+/}${HASS}" "${TYPE}" "${INVERTER}" "${SERIAL}" "${NAME}" "${FRIENDLY_NAME}" "${UNITS}" "${STATE_CLASS}" "${COMMAND,,}")"
+
+			[ ${#PROCESSED_COMMANDS[*]} -eq 0 ] && {
+				JSON="$(hass-add-json "${JSON}" "device" "$(hass-origin)")"
+				JSON="$(hass-add-json "${JSON}" "identifiers" "\"name\":\"${INVERTER_NAME^}\"")"
+				JSON="$(hass-add-json "${JSON}" "identifiers" "\"serial_number\":\"${SERIAL}\"")"
+				JSON="$(hass-add-json "${JSON}" "identifiers" "\"sw_version\":\"${FW_VERSION}, ${PROTOCOL}\"")"
+				JSON="$(hass-add-json "${JSON}" "identifiers" "\"model\":\"${MODEL} (${MODEL_ID})\"")"
+				# JSON="$(hass-add-json "${JSON}" "identifiers" "\"model_id\":\"${MODEL_ID}\"")"
+			}
+
+			[ -n "${AXPERT_SETTINGS[${NAME}]}" ] && {
+				JSON="$(hass-add-json "${JSON}" "state_topic" "\"optimistic\":true")"
+				JSON="$(hass-add-json "${JSON}" "state_topic" "\"command_topic\":\"${MQTT_TOPIC}${MQTT_TOPIC:+/}${INVERTER}/set/${NAME}\"")"
+			}
+
+			[ "select" = "${PLATFORM}" -o "enum" = "${DEVICE_CLASS}" ] && {
+				local OPTIONS=
+				local OPTION_SEPARATOR=
+				local OPTION
+
+				for OPTION in ${VAR[VALUES]}
+				do
+					local OPTION_VALUE="${VAR[VALUE_${OPTION^^}]:-${OPTION}}" 
+					OPTIONS+="${OPTION_SEPARATOR}\"${OPTION_VALUE}\""
+					OPTION_SEPARATOR=","
+				done
+
+				[ -n "${OPTIONS}" ] && JSON="$(hass-add-json "${JSON}" "state_topic" "\"options\":[${OPTIONS}]")"
+			}
+
+			[ "binary_sensor" = "${PLATFORM}" -o "switch" = "${PLATFORM}" ] && {
+				local PAYLOAD_OFF="${VAR[VALUE_0]:-0}"
+				local PAYLOAD_ON="${VAR[VALUE_1]:-1}"
+
+				JSON="$(hass-add-json "${JSON}" "state_topic" "\"payload_off\":\"${VAR[VALUE_0]:-0}\"")"
+				JSON="$(hass-add-json "${JSON}" "state_topic" "\"payload_on\":\"${VAR[VALUE_1]:-1}\"")"
+			}
+
+			[ "switch" = "${PLATFORM}" ] && {
+				JSON="$(hass-add-json "${JSON}" "state_topic" "\"assumed_state\":false")"
+			}
+
+			[ "text" = "${PLATFORM}" -a -n "${DEVICE_CLASS}" ] && {
+				JSON="${JSON/\"device_class\":/\"mode\":}"
+			}
+
+			[ -n "${VAR[ICON]}" ] && {
+				JSON="$(hass-add-json "${JSON}" "state_topic" "\"icon\":\"${VAR[ICON]}\"")"
+			}
+
+			if [ "!" = "${VAR[TYPE]:0:1}" ]
+			then
+				ENABLED="false"
+			else
+				ENABLED="true"
+			fi
+
+			JSON="$(hass-add-json "${JSON}" "state_topic" "\"enabled_by_default\":${ENABLED}")"
+
+			echo "${JSON}"
+
+		done 
+
+		PROCESSED_COMMANDS[${COMMAND}]=1
+	done
+
+}
+
+function process-output {
+	local LINE
+	local PREFIX="${MQTT_TOPIC}"
+
+	[ -n "${PREFIX}" -a -z "${RAW}" ] && [ -z "${JSON}" -o -n "${HASS}" ] && PREFIX="${PREFIX}/"
+
+	while read -r LINE
+	do
+		local SEPARATOR
+
+		if [ -z "${MQTT}" ]
+		then
+			echo "${LINE}"
+		else
+			local TOPIC="${LINE%% *}"
+
+			if [ -z "${TOPIC%%*/config}" ]
+			then
+				SEPARATOR="+"
+			else 
+				SEPARATOR="#"
+			fi
+	
+			if [ -n "${HASS}" -o -n "${HASS_REGISTER}" ]
+			then
+				echo "${PREFIX}${LINE/ /${SEPARATOR}}"
+			elif [ -n "${RAW}" -o -n "${JSON}" ]
+			then
+				echo "${PREFIX}${SEPARATOR}${LINE}"
+			else
+				echo "${PREFIX}${LINE/=/${SEPARATOR}}"
+			fi
+		fi
+	done
+}
+
+function usage {
+	local ARGS=("--hass-register[=PREFIX] --monitor")
+
+	[ "register" != "$1" ] && {
+		local CMDLIST="${!AXPERT_STATUS_COMMANDS[*]}"
+		[ -n "${CMDLIST}" ] && ARGS+=(--all --${CMDLIST// / --})
+		ARGS+=( "COMMAND[...]" )
+	}
+
+	local ARGL="${ARGS[*]}"
+	ARGL="${ARGL// / | }"
+
+	echo "usage: $0 [OPTIONS] ${ARGL}" >&2
+	echo "        -i INVERTER | --inverter=INVERTER" >&2
+	echo "        -n NAME | --inverter-name=NAME" >&2
+	echo "        -d DEVICE | --device=DEVICE" >&2
+	echo "        -m MODEL | --model=MODEL" >&2
+	[ "$1" != "register" ] && echo "        -r | --raw | -j | --json | -h | -hass[=PREFIX]" >&2
+	echo "        --mqtt[=TOPIC]" >&2
+
+	return 0
+}
+
+
+MONITOR=
+INVERTER=
+INVERTER_NAME=
+DEV=
+MODEL=
+DEFS=
+TIMEOUT=
+COMMANDS=
+RAW=
+JSON=
+HASS=
+MQTT=
+MQTT_TOPIC=
+HASS_REGISTER=
+
+if [ ":$*" = ":--install" ]
+then
+	axpert-query-install
+	exit $?
+fi
+
+while [ $# -gt 0 ]
+do
+	case "$1" in
+		-i)
+			[ -n "${INVERTER}" ] && usage && exit 1
+			INVERTER="$2"
+			[ -z "${INVERTER}" ] && usage && exit 1
+
+			shift 1
+			;;
+		
+		--inverter=*)
+			[ -n "${INVERTER}" ] && usage && exit 1
+			INVERTER="${1#--inverter=}"
+			[ -z "${INVERTER}" ] && usage && exit 1
+
+			;;
+
+		-n)
+			[ -n "${INVERTER_NAME}" ] && usage && exit 1
+			INVERTER_NAME="$2"
+			[ -z "${INVERTER_NAME}" ] && usage && exit 1
+
+			shift 1
+			;;
+		
+		--inverter-name=*)
+			[ -n "${INVERTER_NAME}" ] && usage && exit 1
+			INVERTER_NAME="${1#--inverter-name=}"
+			[ -z "${INVERTER_NAME}" ] && usage && exit 1
+
+			;;
+
+		-d)
+			[ -n "${DEV}" ] && usage && exit 1
+			DEV="$2"
+			[ -z "${DEV}" ] && usage && exit 1
+
+			shift 1
+			;;
+		
+		--device=*)
+			[ -n "${DEV}" ] && usage && exit 1
+			DEV="${1#--device=}"
+			[ -z "${DEV}" ] && usage && exit 1
+
+			;;
+
+		-m)
+			[ -n "${MODEL}" ] && usage && exit 1
+			MODEL="$2"
+			[ -z "${MODEL}" ] && usage && exit 1
+
+			shift 1
+			;;
+		
+		--model=*)
+			[ -n "${MODEL}" ] && usage && exit 1
+			MODEL="${1#--model=}"
+			[ -z "${MODEL}" ] && usage && exit 1
+
+			;;
+
+		-r|--raw)
+			[ -n "${RAW}" ] && usage && exit 1
+			RAW="1"
+			;;
+		
+		-j|--json)
+			[ -n "${JSON}" ] && usage && exit 1
+			JSON="1"
+			;;
+		
+		-h|--hass)
+			[ -n "${HASS}" ] && usage && exit 1
+			HASS="homeassistant"
+			;;
+		
+		--hass=*)
+			[ -n "${HASS}" ] && usage && exit 1
+			HASS="${1#--hass=}"
+			[ -z "${HASS}" ] && usage && exit 1
+
+			;;
+		
+		--hass-register)
+			[ -n "${HASS_REGISTER}" ] && usage && exit 1
+			HASS_REGISTER="homeassistant"
+			;;
+		
+		--hass-register=*)
+			[ -n "${HASS_REGISTER}" ] && usage && exit 1
+			HASS_REGISTER="${1#--hass-register=}"
+			[ -z "${HASS_REGISTER}" ] && usage && exit 1
+
+			;;
+		
+		--monitor)
+			[ -n "${MONITOR}" ] && usage && exit 1
+			MONITOR=10
+			;;
+
+		--mqtt)
+			[ -n "${MQTT}" ] && usage && exit 1
+			MQTT=1
+			;;
+
+		--mqtt=*)
+			[ -n "${MQTT}" ] && usage && exit 1
+			MQTT=1
+			MQTT_TOPIC="${1#--mqtt=}"
+			[ -z "${MQTT_TOPIC}" ] && usage && exit 1
+			;;
+
+		--*)
+			[ -n "${COMMANDS[*]}" -o $# -gt 1 ] && usage && exit 1
+			COMMANDS=( "$1" )
+
+			;;
+		
+		-*)
+			usage && exit 1
+			;;
+
+		*)
+			[ -n "${COMMANDS[*]}" ] && usage && exit 1
+			COMMANDS=( "$@" )
+
+			shift "$#"
+	esac
+		
+	shift 1
+done
+
+[ "${HASS_REGISTER:+1}${MONITOR:+1}${COMMANDS[*]:+1}" != "1" ] && usage && exit 1
+[ "1${RAW:+1}${JSON:+1}${HASS:+1}" -gt "11" ] && usage && exit 1
+[ -n "${HASS_REGISTER}" -a -n "${RAW:+1}${JSON:+1}${HASS:+1}" ] && usage "register" && exit 1
+
+[ -z "${TIMEOUT}" ] && TIMEOUT=5
+[ -n "${HASS}" ] && JSON=1
+
+
+[ -z "${INVERTER}" ] && INVERTER="inverter"
+[ -z "${INVERTER//*[!a-zA-Z0-9_-]*}" ] && error "Invalid inverter name: ${INVERTER}" && exit 1
+
+CONFIG_FILE="${BASEDIR}/etc/${INVERTER}.conf"
+config "${CONFIG_FILE}" "CONFIG"
+
+[ -z "${DEV}" ] && DEV="${CONFIG[DEVICE]:-/dev/axpert-${INVERTER}}"
+[ ! -c "${DEV}" ] && error "Invalid device file: ${DEV}" && exit 2
+
+[ -z "${MODEL}" ] && MODEL="${CONFIG[INVERTER_MODEL]}"
+[ -z "${MODEL}" ] && {
+	MODEL="$(axpert-query "${DEV}" "QMN")"
+	[ -z "${MODEL}" ] && error "Unable to determine inverter model" && exit 2
+
+	[ -z "${CONFIG[INVERTER_MODEL]+set}" -a -r "${CONFIG_FILE}" ] && echo "INVERTER_MODEL=\"${MODEL}\" # Automatically generated" >>"${CONFIG_FILE}"
+}
+
+[ -z "${INVERTER_NAME}" ] && {
+	INVERTER_NAME="${CONFIG[INVERTER_NAME]:-${INVERTER^}}"
+	[ -z "${CONFIG[INVERTER_NAME]+set}" -a -r "${CONFIG_FILE}" ] && echo "INVERTER_NAME=\"${INVERTER_NAME}\" # Automatically generated" >>"${CONFIG_FILE}"
+}
+
+[ -z "${DEFS}" ] && {
+	DEFS="${BASEDIR}/lib/defs/axpert.${MODEL,,}.inc"
+	[ ! -r "${DEFS}" ] && DEFS="${DEFS%%-*.inc}.inc"
+	[ ! -r "${DEFS}" ] && error "Unable to read defs file for model '${MODEL}'" && exit 2
+}
+
+[ -n "${MONITOR}" -a -z "${CONFIG[CONFIG_MODE_PIN]+set}" ] && {
+	CONFIG[CONFIG_MODE_PIN]="0000${RANDOM}"
+	CONFIG[CONFIG_MODE_PIN]="${CONFIG[CONFIG_MODE_PIN]: -4}"
+	[ -r "${CONFIG_FILE}" ] && echo "CONFIG_MODE_PIN=\"${CONFIG[CONFIG_MODE_PIN]}\" # Automatically generated" >>"${CONFIG_FILE}"
+}
+
+. "${DEFS}"
+
+[ ":--" = ":${COMMANDS[*]%%[!-]*}" ] && {
+	CMDSET="${COMMANDS[*]#--}"
+
+	if [ ":all" = ":${CMDSET}" ]
+	then
+		COMMANDS=( ${AXPERT_STATUS_COMMANDS[*]} )
+	else
+		COMMANDS=( ${AXPERT_STATUS_COMMANDS[${CMDSET}]} )
+	fi
+
+	[ -z "${COMMANDS[*]}" ] && usage && exit 1
+}
+
+
+if [ -z "${MONITOR}" ]
+then
+	if [ -n "${HASS_REGISTER}" ]
+	then
+		declare -a EXEC_COMMAND=( hass-register "${DEV}" "${HASS_REGISTER}" "${INVERTER}" "${INVERTER_NAME}" )
+	else
+		declare -a EXEC_COMMAND=( axpert-command "${COMMANDS[@]}" )
+	fi
+
+	exec {MONITOR_INPUT}>/dev/null
+	exec {MONITOR_OUTPUT}</dev/null
+
+else
+	declare -a EXEC_COMMAND=( axpert-monitor "${MONITOR}" "${HASS}" "${DEV}" "${INVERTER_NAME}" )
+
+	if [ -n "${MQTT}" ]
+	then
+		MONITOR_INPUT=
+		exec 0</dev/null
+	else
+		exec {MONITOR_INPUT}<&0
+	fi
+
+	CONTROL_PID="$$"
+
+	coproc MONITOR_PROCESS {
+		[ -n "${MONITOR_INPUT}" ] && exec 0<&${MONITOR_INPUT}
+
+		if [ -n "${HASS}" ]
+		then
+			PREFIX=("${MQTT_TOPIC}${MQTT_TOPIC:+/}${INVERTER}/set/")
+		else
+			PREFIX=("${MQTT_TOPIC}${MQTT_TOPIC:+/}set/")
+		fi
+
+		while read -r LINE 2>/dev/null
+		do
+			# echo ">>> ${LINE}" >&2
+			echo "${LINE#${PREFIX}}"
+		done
+	}
+
+	MONITOR_INPUT=${MONITOR_PROCESS[1]}
+	MONITOR_OUTPUT=${MONITOR_PROCESS[0]}
+fi
+
+
+if [ -n "${MQTT}" ]
+then
+	declare -a SUBSCRIBE=()
+
+	if [ -n "${HASS}" ]
+	then
+		SUBSCRIBE+=("${MQTT_TOPIC}${MQTT_TOPIC:+/}${INVERTER}/command")
+		SUBSCRIBE+=("${MQTT_TOPIC}${MQTT_TOPIC:+/}${INVERTER}/set/+")
+	else
+		SUBSCRIBE+=("${MQTT_TOPIC}/command")
+		SUBSCRIBE+=("${MQTT_TOPIC}/set/+")
+	fi
+
+	declare -a OUTPUT_COMMAND=( "${BASEDIR}/bin/mqtt-client" "${SUBSCRIBE[@]}" )
+	export MQTT_USER="${CONFIG[MQTT_USER]}"
+	export MQTT_PASSWORD="${CONFIG[MQTT_PASSWORD]}"
+	OUTPUT_COMMAND_STREAM=${MONITOR_INPUT}
+	exec 1>/dev/null
+else
+	declare -a OUTPUT_COMMAND=()
+	OUTPUT_COMMAND_STREAM=1
+fi
+
+for SIGNAL in SIGHUP SIGINT SIGQUIT SIGABRT SIGKILL SIGALRM SIGTERM SIGUSR1 SIGUSR2
+do
+	trap "signal-terminate '${SIGNAL}'" "${SIGNAL}"
+done
+
+if [ -z "${OUTPUT_COMMAND[*]}" ]
+then
+	"${EXEC_COMMAND[@]}" > >(process-output) && { [ -n "${MONITOR}" ] || wait; }
+else
+	exec >&${MONITOR_INPUT}
+	"${EXEC_COMMAND[@]}" > >(process-output | "${OUTPUT_COMMAND[@]}") && { [ -n "${MONITOR}" ] || wait; }
+fi
+
