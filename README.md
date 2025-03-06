@@ -34,8 +34,8 @@ git clone https://github.com/puzzle-star/axpert-inverter-hass /opt/inverter
 /opt/bin/axpert-query --install
 ```
 
-Edit the installed `/opt/inverter/etc/inverter.conf` file to provide your MQTT credentials. The service will fail to start untill you provide these, but once done, it should start automatically.
+Edit the installed `/opt/inverter/etc/inverter.conf` file to provide your MQTT credentials. The service will fail to start until you provide these, but once done, it should start automatically.
 
 ## Bugs
 
-The configuration PIN is easily dicovered in Home Assistant by just looking into the history of the text field. It is intended to avoid acccidental activation of **configuration mode**, but if you want the PIN to be kept secret, please make sure co configure the Home Assistant recorder not to keep track of the `text.inverter_unlock_config_mode_pin` entity.
+The configuration PIN is easily dicovered in Home Assistant by just looking into the history of the text field. It is intended to avoid acccidental activation of **configuration mode**, but if you want the PIN to be kept secret, please make sure to configure the Home Assistant recorder not to keep track of the `text.inverter_unlock_config_mode_pin` entity.
