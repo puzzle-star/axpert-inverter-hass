@@ -519,9 +519,9 @@ AXPERT_COMMAND_QPIRI[output_source_priority]="Output Source Priority"
 AXPERT_COMMAND_QPIRI_OUTPUT_SOURCE_PRIORITY[INDEX]=17
 AXPERT_COMMAND_QPIRI_OUTPUT_SOURCE_PRIORITY[TYPE]="select"
 AXPERT_COMMAND_QPIRI_OUTPUT_SOURCE_PRIORITY[VALUES]="0 1 2"
-AXPERT_COMMAND_QPIRI_OUTPUT_SOURCE_PRIORITY[VALUE_0]="Utility First"
+AXPERT_COMMAND_QPIRI_OUTPUT_SOURCE_PRIORITY[VALUE_0]="Grid First"
 AXPERT_COMMAND_QPIRI_OUTPUT_SOURCE_PRIORITY[VALUE_1]="Solar First"
-AXPERT_COMMAND_QPIRI_OUTPUT_SOURCE_PRIORITY[VALUE_2]="Solar/Battery/Utility"
+AXPERT_COMMAND_QPIRI_OUTPUT_SOURCE_PRIORITY[VALUE_2]="Solar / Battery / Grid"
 
 declare -A AXPERT_SETTING_OUTPUT_SOURCE_PRIORITY
 AXPERT_SETTINGS[output_source_priority]="QPIRI"
@@ -534,9 +534,9 @@ AXPERT_COMMAND_QPIRI[charger_source_priority]="Charger Source Priority"
 AXPERT_COMMAND_QPIRI_CHARGER_SOURCE_PRIORITY[INDEX]=18
 AXPERT_COMMAND_QPIRI_CHARGER_SOURCE_PRIORITY[TYPE]="select"
 AXPERT_COMMAND_QPIRI_CHARGER_SOURCE_PRIORITY[VALUES]="0 1 2 3"
-AXPERT_COMMAND_QPIRI_CHARGER_SOURCE_PRIORITY[VALUE_0]="Utility First"
+AXPERT_COMMAND_QPIRI_CHARGER_SOURCE_PRIORITY[VALUE_0]="Grid First"
 AXPERT_COMMAND_QPIRI_CHARGER_SOURCE_PRIORITY[VALUE_1]="Solar First"
-AXPERT_COMMAND_QPIRI_CHARGER_SOURCE_PRIORITY[VALUE_2]="Solar/Utility"
+AXPERT_COMMAND_QPIRI_CHARGER_SOURCE_PRIORITY[VALUE_2]="Solar / Grid"
 AXPERT_COMMAND_QPIRI_CHARGER_SOURCE_PRIORITY[VALUE_3]="Solar Only"
 
 declare -A AXPERT_SETTING_CHARGER_SOURCE_PRIORITY
@@ -1242,7 +1242,6 @@ AXPERT_COMMAND_QPIGS_AC_OUTPUT_POWER_FACTOR[INDEX]="axpert_calculate_power_facto
 AXPERT_COMMAND_QPIGS_AC_OUTPUT_POWER_FACTOR[TYPE]="measurement.power_factor"
 AXPERT_COMMAND_QPIGS_AC_OUTPUT_POWER_FACTOR[UNITS]=
 
-
 # Calculated
 
 function axpert_calculate_power_factor {
@@ -1257,6 +1256,59 @@ function axpert_calculate_power_factor {
 	echo "${PF:0:1}.${PF:1:2}"
 }
 
+
+# -----------------------------------------------------------------------------------------------------------
+# Preset modes
+# -----------------------------------------------------------------------------------------------------------
+
+# device: preset_mode
+
+declare -A AXPERT_COMMAND_QPIRI_PRESET_MODE
+AXPERT_COMMAND_QPIRI[preset_mode]="Preset Mode"
+# AXPERT_COMMAND_QPIRI_PRESET_MODE[INDEX]="axpert_preset_mode {operation_logic} {output_source_priority} {charger_source_priority}"
+AXPERT_COMMAND_QPIRI_PRESET_MODE[INDEX]="axpert_preset_mode {operation_logic} {charger_source_priority}"
+AXPERT_COMMAND_QPIRI_PRESET_MODE[TYPE]="select"
+AXPERT_COMMAND_QPIRI_PRESET_MODE[VALUES]="online battery bypass bypass-no-charge"
+AXPERT_COMMAND_QPIRI_PRESET_MODE[VALUE_ONLINE]="Online"
+AXPERT_COMMAND_QPIRI_PRESET_MODE[VALUE_BATTERY]="Battery"
+AXPERT_COMMAND_QPIRI_PRESET_MODE[VALUE_BYPASS]="Bypass"
+AXPERT_COMMAND_QPIRI_PRESET_MODE[VALUE_BYPASS_NO_CHARGE]="Bypass (No Grid Charging)"
+
+declare -A AXPERT_SETTING_PRESET_MODE
+AXPERT_SETTINGS[preset_mode]="QPIRI"
+AXPERT_SETTING_PRESET_MODE[COMMAND]=""
+AXPERT_SETTING_PRESET_MODE[COMMAND_ONLINE]="#POPLG01 PCP01"
+AXPERT_SETTING_PRESET_MODE[COMMAND_BATTERY]="#POPLG01 PCP03"
+AXPERT_SETTING_PRESET_MODE[COMMAND_BYPASS]="#POPLG02 PCP01"
+AXPERT_SETTING_PRESET_MODE[COMMAND_BYPASS_NO_CHARGE]="#POPLG02 PCP03"
+
+function axpert_preset_mode {
+	local OPERATION_LOGIC="${1//[^a-zA-Z]/}"
+	local CHARGER_SOURCE_PRIORITY="${2//[^a-zA-Z]/}"
+
+	local PRESET=
+
+	case "${OPERATION_LOGIC}:${CHARGER_SOURCE_PRIORITY}"
+	in
+		Online:SolarFirst )
+			PRESET="online"
+			;;
+
+		Online:SolarOnly )
+			PRESET="battery"
+			;;
+
+		Eco:SolarFirst )
+			PRESET="bypass"
+			;;
+			
+		Eco:SolarOnly )
+			PRESET="bypass-no-charge"
+			;;
+	esac
+
+	echo "${PRESET}"
+}
 
 
 # -----------------------------------------------------------------------------------------------------------
@@ -1339,4 +1391,5 @@ function axpert_unlock_config_mode {
 		echo "Incorrect PIN provided for Config Mode" >&2
 	fi
 }
+
 
